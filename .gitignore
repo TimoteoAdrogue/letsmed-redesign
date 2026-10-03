@@ -1,0 +1,10 @@
+# Sources and working files stay local; the deployable site is index.html + assets/
+assets/src/
+assets/cut/
+assets/gen.json
+ref/
+review/
+.playwright-mcp/
+.DS_Store
+tools/
+assets/LEDGER.md
