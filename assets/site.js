@@ -40,8 +40,14 @@ let lenisRef = null;           // the smooth scroller, only in full mode
 const motionOK = () => !matchMedia("(prefers-reduced-motion: reduce)").matches;
 const EN = {};                 // the English strings, read from the page itself
 $$("[data-i18n]").forEach((el) => { EN[el.dataset.i18n] = el.textContent; });
-const FULL = "(min-width: 768px) and (pointer: fine) and (prefers-reduced-motion: no-preference)";
+const MOTION = "(prefers-reduced-motion: no-preference)";
 const REDUCE = "(prefers-reduced-motion: reduce)";
+// Full choreography: any screen with a mouse, and touch screens tall enough to hold the pinned stages
+// (phones upright, tablets). A phone on its side keeps the still page.
+const FULL = `${MOTION} and (pointer: fine), ${MOTION} and (min-height: 500px)`;
+const SHORT = ["(pointer: coarse) and (max-height: 499.98px)", "(pointer: none) and (max-height: 499.98px)"];
+const STILL = [REDUCE, ...SHORT].join(", ");  // exactly what FULL leaves out
+const NARROW = "(max-width: 767px)", TOUCH = "(pointer: coarse)";
 
 /* ---------------- nav: hidden until the film ends, hides on scroll down ---------------- */
 const nav = $("#nav");
@@ -74,8 +80,11 @@ mm.add("(prefers-reduced-motion: no-preference)", () => {
   return () => { splits.delete(split); split.revert(); };
 });
 
-/* ---------------- full mode ---------------- */
-mm.add(FULL, () => {
+/* ---------------- full mode ----------------
+   Phones get the same choreography with a narrow layout (`narrow`); touch screens skip the
+   cursor effects and scroll natively (Lenis leaves touch alone). Crossing either line rebuilds it. */
+mm.add({ full: FULL, narrow: NARROW, touch: TOUCH }, ({ conditions: { full, narrow, touch } }) => {
+  if (!full) return;
   const lenis = new Lenis({ lerp: 0.1, anchors: true });
   lenisRef = lenis;
   lenis.on("scroll", ScrollTrigger.update);
@@ -87,8 +96,11 @@ mm.add(FULL, () => {
   const undo = [];
   const on = (el, ev, fn) => { el.addEventListener(ev, fn); undo.push(() => el.removeEventListener(ev, fn)); };
 
-  magnetic($$(".magnetic"));
-  const film = scrubFilm($(".hero-film"), $(".hero"));
+  if (!touch) magnetic($$(".magnetic"));
+  // Phones get a portrait cut of the film: a third of the bytes, and the same crop object-fit would show.
+  const film = scrubFilm($(".hero-film"), $(".hero"), `assets/video/hero-scrub${narrow ? "-portrait" : ""}.mp4`, touch);
+  // On a fast native fling a pin can land a frame late: let ScrollTrigger set it slightly early.
+  const ahead = touch ? 1 : 0;
 
   /* The globe: one full-viewport WebGL layer. Scroll tweens drive `gs` (centre, radius, unwrap),
      the module renders it. Slots are measured relative to their pinned section, so each target is
@@ -97,9 +109,19 @@ mm.add(FULL, () => {
   const gs = { x: 0, y: 0, r: 200, morph: 0, arcs: 1, dim: 1, draw: 0 };
   let globe = null;
   import("./globe.js").then(({ createGlobe }) => createGlobe(host, { hubs: HUBS, arcs: ARCS, state: gs })).then((g) => { globe = g; globe.render(); });
-  const vw = () => innerWidth, vh = () => innerHeight;
+  // The stages are 100svh tall. innerHeight grows as iOS Safari's toolbars slide away (and ScrollTrigger
+  // ignores that resize), so measure the stage unit itself, once per refresh.
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:fixed;top:0;height:100svh;visibility:hidden;pointer-events:none";
+  document.body.appendChild(probe);
+  let VH = innerHeight;
+  const measureVH = () => { VH = probe.offsetHeight || innerHeight; };
+  measureVH();
+  ScrollTrigger.addEventListener("refreshInit", measureVH);
+  undo.push(() => { ScrollTrigger.removeEventListener("refreshInit", measureVH); probe.remove(); });
+  const vw = () => innerWidth, vh = () => VH;
   const rel = (el, box) => { const a = el.getBoundingClientRect(), b = box.getBoundingClientRect(); return { x: a.left - b.left, y: a.top - b.top, w: a.width, h: a.height }; };
-  const slot = (el, box) => () => { const r = rel(el, box); return { x: r.x + r.w / 2, y: r.y + r.h / 2, r: r.w * 0.36 }; };
+  const slot = (el, box) => () => { const r = rel(el, box); return { x: r.x + r.w / 2, y: r.y + r.h / 2, r: Math.min(r.w, r.h) * 0.36 }; };
   const atHero = slot($("#slot-hero"), $(".hero-stage"));
   const atAbout = slot($("#slot-about"), $("#about"));
   const atSmall = () => ({ x: vw() / 2, y: vh() * 0.52, r: Math.min(vw(), vh()) * 0.15 });
@@ -152,7 +174,7 @@ mm.add(FULL, () => {
 
   /* 2. ABOUT, pinned: words light up; the globe is live (drag with inertia, hub labels, arc pulses). */
   let live = false;
-  const aboutPin = ScrollTrigger.create({ trigger: "#about", start: "top top", end: "+=110%", pin: true,
+  const aboutPin = ScrollTrigger.create({ trigger: "#about", start: "top top", end: "+=110%", pin: true, anticipatePin: ahead,
     onToggle: (s) => { live = s.isActive; if (!live) setHub(null); } });
   // The light-up lives in onSplit so a language switch (revert, new text, split) rebuilds it.
   const words = SplitText.create(".about-text", { type: "words", wordsClass: "w", autoSplit: true, // autoSplit re-reads new text
@@ -180,11 +202,13 @@ mm.add(FULL, () => {
   gsap.ticker.add(follow);
   undo.push(() => gsap.ticker.remove(follow));
   const slotA = $("#slot-about");
+  // On touch the slot only claims sideways swipes (touch-action: pan-y): a finger spins the globe,
+  // an upward swipe still scrolls the page, a tap shows a hub.
   on(slotA, "pointerdown", (e) => { if (!live || !globe) return; down = { x: e.clientX, y: e.clientY, moved: false }; slotA.setPointerCapture(e.pointerId); });
   on(slotA, "pointermove", (e) => {
     if (!live || !globe) return;
     if (down) {
-      const dx = e.clientX - down.x, dy = e.clientY - down.y;
+      const dx = e.clientX - down.x, dy = e.pointerType === "touch" ? 0 : e.clientY - down.y;
       if (Math.abs(dx) + Math.abs(dy) > 3) { down.moved = true; setHub(null); }
       globe.drag(dx, dy); down.x = e.clientX; down.y = e.clientY;
       return;
@@ -193,8 +217,8 @@ mm.add(FULL, () => {
   });
   const up = (e) => { if (!down) return; globe.release(); if (!down.moved) setHub(globe.pick(e.clientX, e.clientY, 26)); down = null; };
   on(slotA, "pointerup", up);
-  on(slotA, "pointercancel", up);
-  on(slotA, "pointerleave", () => { if (!down) setHub(null); });
+  on(slotA, "pointercancel", () => { if (down) { globe.release(); down = null; } }); // the page took the gesture: a scroll, not a tap
+  on(slotA, "pointerleave", (e) => { if (!down && e.pointerType !== "touch") setHub(null); }); // a lifted finger "leaves" right after its tap
 
   /* T2 starts: About leaves, the globe recedes to the centre and begins to unwrap. */
   gsap.fromTo(P, ...seg("recede", { ease: "power1.inOut",
@@ -219,14 +243,29 @@ mm.add(FULL, () => {
   const irisAt = () => { const r = rel(brand, stage); return { x: r.x + r.w / 2, y: r.y + r.h / 2 }; };
   const irisR = () => { const c = irisAt(); return Math.hypot(Math.max(c.x, vw() - c.x), Math.max(c.y, vh() - c.y)) + 24; };
   const parcelAt = { t: 0 };
-  const moveParcel = () => {
+  let moveParcel = () => {
     const L = trackPath.getTotalLength(), p = trackPath.getPointAtLength(parcelAt.t * L);
     gsap.set(parcel, { x: (p.x / 1200) * track.clientWidth, y: p.y });
   };
+  // Phones stack the steps, so the route is a rail down the node column: it fills in, the parcel rides it.
+  let rail = null;
+  if (narrow) {
+    track.insertAdjacentHTML("afterbegin", '<span class="how-rail" aria-hidden="true"><i></i></span>');
+    rail = $(".how-rail", track);
+    let a = null, b = null;
+    const centre = (s) => { const r = rel(s.querySelector(".node"), track); return { x: r.x + r.w / 2, y: r.y + r.h / 2 }; };
+    const placeRail = () => { a = centre(steps[0]); b = centre(steps[steps.length - 1]); gsap.set(rail, { x: a.x, y: a.y, height: b.y - a.y }); moveParcel(); };
+    moveParcel = () => { if (a) gsap.set(parcel, { x: a.x, y: lerp(a.y, b.y, parcelAt.t) }); };
+    placeRail();
+    ScrollTrigger.addEventListener("refresh", placeRail);
+    undo.push(() => { ScrollTrigger.removeEventListener("refresh", placeRail); rail.remove(); });
+  }
+  // The route draws in: a clip across the desktop path, a scale down the phone rail.
+  const draw = rail ? [rail.firstChild, { scaleY: 0 }, { scaleY: 1 }] : [".how-path.is-drawn", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)" }];
   const STEP_AT = [2.45, 3.2, 3.95];
 
   const tl = gsap.timeline({ defaults: { ease: "none" },
-    scrollTrigger: { trigger: stage, start: "top top", end: "+=500%", pin: true, scrub: 0.6, invalidateOnRefresh: true } });
+    scrollTrigger: { trigger: stage, start: "top top", end: "+=500%", pin: true, anticipatePin: ahead, scrub: 0.6, invalidateOnRefresh: true } });
   tl
     // T2 ends
     .fromTo(band, { clipPath: "inset(0% 0% 100% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: 0.6, ease: "power2.inOut" }, 0)
@@ -240,7 +279,7 @@ mm.add(FULL, () => {
     .fromTo(P, ...seg("lift", { duration: 0.8, ease: "power2.inOut" }), 1.6)
     .fromTo(P, ...seg("gone", { duration: 0.05 }), 2.36)
     // How it works
-    .fromTo(".how-path.is-drawn", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: 1.5 }, 2.45)
+    .fromTo(draw[0], draw[1], { ...draw[2], duration: 1.5 }, 2.45)
     .fromTo(parcelAt, { t: 0 }, { t: 1, duration: 1.5, onUpdate: moveParcel }, 2.45)
     .fromTo(parcel, { scale: 0 }, { scale: 1, duration: 0.12, ease: "back.out(2)" }, 2.42);
   steps.forEach((s, i) => {
@@ -286,7 +325,7 @@ mm.add(FULL, () => {
   const cards = $$(".pillar");
   cards.forEach((card, i) => {
     if (i === cards.length - 1) return;
-    ScrollTrigger.create({ trigger: card, start: "top top", endTrigger: cards[cards.length - 1], end: "top top", pin: true, pinSpacing: false });
+    ScrollTrigger.create({ trigger: card, start: "top top", endTrigger: cards[cards.length - 1], end: "top top", pin: true, pinSpacing: false, anticipatePin: ahead });
     // Dim with a shade layer's opacity: a scrubbed filter on a 1200 px card repainted every frame
     // (all of the page's slow frames were here), and card opacity let the cards beneath show through.
     const c = card.querySelector(".card");
@@ -302,7 +341,7 @@ mm.add(FULL, () => {
   ScrollTrigger.create({ trigger: stage, start: "top bottom", once: true, onEnter: predecode(".pillar img") });
   ScrollTrigger.create({ trigger: ".why", start: "top bottom", once: true, onEnter: predecode(".cutout, .wh") });
   // Spotlight on the card edge follows the cursor.
-  $$(".card").forEach((c) => on(c, "pointermove", (e) => {
+  if (!touch) $$(".card").forEach((c) => on(c, "pointermove", (e) => {
     const r = c.getBoundingClientRect();
     c.style.setProperty("--mx", `${e.clientX - r.left}px`);
     c.style.setProperty("--my", `${e.clientY - r.top}px`);
@@ -332,7 +371,8 @@ mm.add(FULL, () => {
   gsap.set(logi, { autoAlpha: 0 });
   undo.push(() => { pull.revert(); gsap.set([logi, whFrame, wh, scrim, ptrack, lastCard, ".pintro > *", ".d-slow", ".d-mid", ".d-fast", ".log-text", ".pull cite", ".offices", ".tile-name > span", ".cutout"], { clearProps: "all" }); });
   const ptl = gsap.timeline({ defaults: { ease: "none" },
-    scrollTrigger: { trigger: pstage, start: "top top", end: () => `+=${TOTAL * vh()}`, pin: true, scrub: 1, invalidateOnRefresh: true } });
+    scrollTrigger: { trigger: pstage, start: "top top", end: () => `+=${TOTAL * vh()}`, pin: true, anticipatePin: ahead, scrub: 1, invalidateOnRefresh: true } });
+  const depth = narrow ? 0.5 : 1; // the three text depths drift half as far on a phone
   ptl
     .fromTo(lastCard, { rotation: 0, x: 0, y: 0 }, { rotation: -6, x: () => -vw() * 0.05, y: () => -vh() * 0.22, transformOrigin: "0% 100%", duration: 1, ease: "power1.in" }, 0)
     .fromTo(".pintro > *", { y: 60, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, stagger: 0.08, ease: "power2.out" }, 0.5)
@@ -349,23 +389,25 @@ mm.add(FULL, () => {
     .fromTo(wh, { scale: 1.45 }, { scale: 1.15, duration: 1, ease: "power2.inOut" }, T6)
     .fromTo(scrim, { opacity: 0 }, { opacity: 1, duration: 0.3 }, T6 + 0.8)
     .fromTo(wh, { scale: 1.15 }, { scale: 1.03, duration: 2.6, immediateRender: false }, LOG)
-    .fromTo(".d-slow", { y: 60 }, { y: -40, duration: 2.6 }, LOG - 0.2)
-    .fromTo(".d-mid", { y: 120 }, { y: -70, duration: 2.6 }, LOG - 0.2)
-    .fromTo(".d-fast", { y: 180 }, { y: -100, duration: 2.6 }, LOG - 0.2)
+    .fromTo(".d-slow", { y: 60 * depth }, { y: -40 * depth, duration: 2.6 }, LOG - 0.2)
+    .fromTo(".d-mid", { y: 120 * depth }, { y: -70 * depth, duration: 2.6 }, LOG - 0.2)
+    .fromTo(".d-fast", { y: 180 * depth }, { y: -100 * depth, duration: 2.6 }, LOG - 0.2)
     .fromTo([".d-slow", ".log-text", ".pull cite", ".offices"], { opacity: 0 }, { opacity: 1, duration: 0.35, stagger: 0.1 }, LOG - 0.15)
     .fromTo(pull.lines, { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: 0.5, stagger: 0.15, ease: "power2.inOut" }, LOG + 0.3)
     .fromTo(wh, { filter: "brightness(1) blur(0px)" }, { filter: "brightness(0.62) blur(10px)", duration: 1 }, T7);
 
-  // Tiles tilt toward the cursor; the warehouse drifts against it.
-  tiles.forEach((t) => {
-    const m = t.querySelector(".tile-media");
-    gsap.set(m, { transformPerspective: 900 });
-    const rx = gsap.quickTo(m, "rotationX", { duration: 0.6, ease: "power3.out" }), ry = gsap.quickTo(m, "rotationY", { duration: 0.6, ease: "power3.out" });
-    on(t, "pointermove", (e) => { const r = t.getBoundingClientRect(); ry(((e.clientX - r.left) / r.width - 0.5) * 14); rx(((e.clientY - r.top) / r.height - 0.5) * -10); });
-    on(t, "pointerleave", () => { rx(0); ry(0); });
-  });
-  const wx = gsap.quickTo(wh, "x", { duration: 0.9, ease: "power3.out" }), wy = gsap.quickTo(wh, "y", { duration: 0.9, ease: "power3.out" });
-  on(logi, "pointermove", (e) => { wx((e.clientX / vw() - 0.5) * -24); wy((e.clientY / vh() - 0.5) * -16); });
+  // Tiles tilt toward the cursor; the warehouse drifts against it. (No cursor on touch.)
+  if (!touch) {
+    tiles.forEach((t) => {
+      const m = t.querySelector(".tile-media");
+      gsap.set(m, { transformPerspective: 900 });
+      const rx = gsap.quickTo(m, "rotationX", { duration: 0.6, ease: "power3.out" }), ry = gsap.quickTo(m, "rotationY", { duration: 0.6, ease: "power3.out" });
+      on(t, "pointermove", (e) => { const r = t.getBoundingClientRect(); ry(((e.clientX - r.left) / r.width - 0.5) * 14); rx(((e.clientY - r.top) / r.height - 0.5) * -10); });
+      on(t, "pointerleave", () => { rx(0); ry(0); });
+    });
+    const wx = gsap.quickTo(wh, "x", { duration: 0.9, ease: "power3.out" }), wy = gsap.quickTo(wh, "y", { duration: 0.9, ease: "power3.out" });
+    on(logi, "pointermove", (e) => { wx((e.clientX / vw() - 0.5) * -24); wy((e.clientY / vh() - 0.5) * -16); });
+  }
   // "Products" lands after the peel, on the products themselves.
   $$('a[href="#products"]').forEach((a) => on(a, "click", (e) => { e.preventDefault(); lenis.scrollTo(ptl.scrollTrigger.start + 1.02 * vh(), { duration: 1.6 }); }));
 
@@ -373,16 +415,20 @@ mm.add(FULL, () => {
   const trust = $("#trust"), cta = $(".iris-cta");
   const ctaAt = () => { const r = rel(cta, trust); return { x: r.x + r.w / 2, y: r.y + r.h / 2 }; };
   const ctaR = () => { const c = ctaAt(); return Math.hypot(Math.max(c.x, trust.offsetWidth - c.x), Math.max(c.y, trust.offsetHeight - c.y)) + 24; };
-  gsap.timeline({ scrollTrigger: { trigger: trust, start: "bottom bottom", end: "+=90%", pin: true, scrub: 0.6, invalidateOnRefresh: true } })
+  gsap.timeline({ scrollTrigger: { trigger: trust, start: "bottom bottom", end: "+=90%", pin: true, anticipatePin: ahead, scrub: 0.6, invalidateOnRefresh: true } })
     .fromTo(".iris-fill", { clipPath: () => `circle(0px at ${ctaAt().x}px ${ctaAt().y}px)` },
       { clipPath: () => `circle(${ctaR()}px at ${ctaAt().x}px ${ctaAt().y}px)`, ease: "power2.in" });
 
-  /* T9: the page lifts off a fixed footer. Main keeps a bottom margin the size of the footer. */
+  /* T9: the page lifts off a fixed footer. Main keeps a bottom margin the size of the footer.
+     A footer taller than the screen (a small phone) stays in the flow: fixed, its top would be out of reach. */
   const footer = $("#footer");
-  const footH = () => root.style.setProperty("--foot-h", `${footer.offsetHeight}px`);
+  const footH = () => {
+    root.style.setProperty("--foot-h", `${footer.offsetHeight}px`);
+    root.classList.toggle("foot-lift", footer.offsetHeight <= vh());
+  };
   footH();
   ScrollTrigger.addEventListener("refreshInit", footH);
-  undo.push(() => { ScrollTrigger.removeEventListener("refreshInit", footH); root.style.removeProperty("--foot-h"); footer.style.visibility = ""; });
+  undo.push(() => { ScrollTrigger.removeEventListener("refreshInit", footH); root.style.removeProperty("--foot-h"); root.classList.remove("foot-lift"); footer.style.visibility = ""; });
   ScrollTrigger.create({ trigger: "#contact", start: "bottom bottom", end: pastEnd, onToggle: (s) => { footer.style.visibility = s.isActive ? "visible" : ""; } });
   gsap.fromTo(".foot-in", { yPercent: -18, opacity: 0.3 }, { yPercent: 0, opacity: 1, ease: "none",
     scrollTrigger: { trigger: "#contact", start: "bottom bottom", end: () => `+=${footer.offsetHeight}`, scrub: true } });
@@ -398,14 +444,14 @@ mm.add(FULL, () => {
   };
 });
 
-/* ---------------- still modes: mobile and reduced motion ---------------- */
-mm.add("(max-width: 767px), (pointer: coarse), " + REDUCE, () => {
+/* ---------------- still modes: reduced motion, and touch screens too short to pin (a phone on its side) ---------------- */
+mm.add(STILL, () => {
   root.classList.add("mode-still");
   nav.classList.remove("is-hidden");
   return () => root.classList.remove("mode-still");
 });
-// Mobile with motion allowed: sections reveal once as they enter. Reduced motion: shown as is.
-mm.add("(max-width: 767px) and (prefers-reduced-motion: no-preference), (pointer: coarse) and (prefers-reduced-motion: no-preference)", () => {
+// Short touch screens with motion allowed: sections reveal once as they enter. Reduced motion: shown as is.
+mm.add(SHORT.map((q) => `${MOTION} and ${q}`).join(", "), () => {
   const els = $$(".counter, .step, .iris-in, .pillar .card");
   els.forEach((el) => el.classList.add("reveal"));
   const io = new IntersectionObserver((es) => es.forEach((e) => {
@@ -594,7 +640,7 @@ root.classList.remove("js");
 
 // The scrubbed film. Cobalt-proven recipe: download the whole file first (a seek that waits on
 // the network stutters), keep one seek in flight and only the latest pending, all-intra encode.
-function scrubFilm(video, hero) {
+function scrubFilm(video, hero, src, touch) {
   const state = { t: 0 };
   let busy = false, pending = null, dead = false;
   const go = (t) => {
@@ -603,21 +649,30 @@ function scrubFilm(video, hero) {
     busy = true;
     try { video.currentTime = t * (video.duration - 0.05); } catch { busy = false; }
   };
-  video.addEventListener("seeked", () => { busy = false; if (pending !== null) { const t = pending; pending = null; go(t); } });
+  const onSeeked = () => { busy = false; if (pending !== null) { const t = pending; pending = null; go(t); } };
+  video.addEventListener("seeked", onSeeked);
   const ctrl = new AbortController();
-  fetch("assets/video/hero-scrub.mp4", { signal: ctrl.signal })
+  fetch(src, { signal: ctrl.signal })
     .then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); })
     .then((b) => {
       if (dead) return;
+      video.preload = "auto";
       video.src = URL.createObjectURL(b);
       video.addEventListener("loadeddata", () => { go(state.t); hero.classList.add("is-film"); }, { once: true });
       video.load();
+      // iOS Safari can hold seeks until a video has played once: play it (muted) for an instant, then
+      // seek again, since a seek sent before that may never report back. Refused (Low Power Mode)? No harm.
+      if (touch) video.play().then(() => { video.pause(); busy = false; go(state.t); }).catch(() => {});
     })
     .catch(() => {}); // the still stays: the page works without the film
   return {
     state,
     seek: () => go(state.t),
-    destroy() { dead = true; ctrl.abort(); hero.classList.remove("is-film"); if (video.src) URL.revokeObjectURL(video.src); video.removeAttribute("src"); },
+    destroy() {
+      dead = true; ctrl.abort(); video.pause(); video.removeEventListener("seeked", onSeeked); hero.classList.remove("is-film");
+      if (video.src) URL.revokeObjectURL(video.src);
+      video.removeAttribute("src"); video.load(); // without load() the old film stays loaded in the element
+    },
   };
 }
 
