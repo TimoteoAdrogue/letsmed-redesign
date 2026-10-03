@@ -223,6 +223,9 @@ mm.add({ full: FULL, narrow: NARROW, touch: TOUCH }, ({ conditions: { full, narr
   /* T2 starts: About leaves, the globe recedes to the centre and begins to unwrap. */
   gsap.fromTo(P, ...seg("recede", { ease: "power1.inOut",
     scrollTrigger: { trigger: "#numbers", start: "top bottom", end: "top top", scrub: 0.6 } }));
+  // Phones stack the copy under the globe, so leaving upward it has to pass the globe: fade it out first.
+  if (narrow) gsap.fromTo(".about-grid > :first-child", { opacity: 1 }, { opacity: 0, ease: "none",
+    scrollTrigger: { trigger: "#numbers", start: "top bottom", end: "top 65%", scrub: 0.6 } });
 
   /* 3-4. One pinned stage. Units are scroll viewports (total 5 => +=500%).
      0-0.7    T2 ends: the band is born from the top while the globe flattens into the faint map

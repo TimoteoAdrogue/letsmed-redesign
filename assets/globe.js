@@ -147,9 +147,15 @@ export async function createGlobe(host, { hubs, arcs, state = { x: 0, y: 0, r: 2
   const AUTO = 0.0009;
   const clock = new THREE.Clock();
 
+  // Sized to the host, not the window: iOS Safari fires resize as its toolbars slide, and even a
+  // same-size setSize() blanks a WebGL canvas until the next frame, so only a real change goes through.
+  let w = 0, h = 0;
   function resize() {
-    renderer.setSize(innerWidth, innerHeight, false);
-    camera.right = innerWidth; camera.bottom = -innerHeight;
+    const nw = host.clientWidth || innerWidth, nh = host.clientHeight || innerHeight;
+    if (nw === w && nh === h) return;
+    w = nw; h = nh;
+    renderer.setSize(w, h, false);
+    camera.right = w; camera.bottom = -h;
     camera.updateProjectionMatrix();
     last = "";
   }
